@@ -152,6 +152,33 @@ body {
   position: relative;
 }
 
+.canvas-toolbar {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+}
+
+.auto-layout-btn {
+  padding: 6px 14px;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  color: #333;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.auto-layout-btn:hover {
+  background: #f0f4ff;
+  border-color: #6c63ff;
+}
+
 /* Properties Panel */
 .properties-panel {
   width: 280px;
