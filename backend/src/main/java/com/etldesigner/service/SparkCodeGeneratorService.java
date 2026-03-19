@@ -30,8 +30,7 @@ public class SparkCodeGeneratorService {
         List<String> sorted = topologicalSort(nodeMap.keySet(), childrenMap);
 
         StringBuilder sb = new StringBuilder();
-        sb.append("from pyspark.sql import SparkSession\n");
-        sb.append("from pyspark.sql import functions as F\n\n");
+        sb.append("from pyspark.sql import SparkSession\n\n");
         sb.append("spark = SparkSession.builder.appName(\"ETL_Pipeline\").getOrCreate()\n\n");
 
         for (String nodeId : sorted) {
@@ -39,8 +38,9 @@ public class SparkCodeGeneratorService {
             if (node == null) continue;
 
             String safeId = nodeId.replaceAll("[^a-zA-Z0-9_]", "_");
+            String viewName = safeId;
             sb.append("# --- Node: ").append(node.getLabel()).append(" ---\n");
-            sb.append(generateNodeCode(node, safeId, parentsMap.get(nodeId), nodeMap));
+            sb.append(generateNodeCode(node, safeId, viewName, parentsMap.get(nodeId), nodeMap));
             sb.append("\n");
         }
 
@@ -88,8 +88,8 @@ public class SparkCodeGeneratorService {
         return result;
     }
 
-    private String generateNodeCode(NodeConfig node, String safeId, List<String> parentIds,
-                                    Map<String, NodeConfig> nodeMap) {
+    private String generateNodeCode(NodeConfig node, String safeId, String viewName,
+                                    List<String> parentIds, Map<String, NodeConfig> nodeMap) {
         Map<String, Object> props = node.getProperties();
         if (props == null) props = Collections.emptyMap();
 
@@ -97,6 +97,7 @@ public class SparkCodeGeneratorService {
         StringBuilder sb = new StringBuilder();
 
         switch (type) {
+            // --- Sources: read data and register as temp view ---
             case "csv_source" -> {
                 String path = getStr(props, "filePath", "/data/input.csv");
                 String delimiter = getStr(props, "delimiter", ",");
@@ -104,6 +105,8 @@ public class SparkCodeGeneratorService {
                   .append(".option(\"header\", \"true\")")
                   .append(".option(\"delimiter\", \"").append(delimiter).append("\")")
                   .append(".csv(\"").append(path).append("\")\n");
+                sb.append("df_").append(safeId)
+                  .append(".createOrReplaceTempView(\"").append(viewName).append("\")\n");
             }
             case "jdbc_source" -> {
                 String url = getStr(props, "url", "jdbc:postgresql://localhost:5432/db");
@@ -117,6 +120,8 @@ public class SparkCodeGeneratorService {
                   .append(".option(\"user\", \"").append(user).append("\")")
                   .append(".option(\"password\", \"").append(password).append("\")")
                   .append(".load()\n");
+                sb.append("df_").append(safeId)
+                  .append(".createOrReplaceTempView(\"").append(viewName).append("\")\n");
             }
             case "kafka_source" -> {
                 String servers = getStr(props, "bootstrapServers", "localhost:9092");
@@ -126,77 +131,94 @@ public class SparkCodeGeneratorService {
                   .append(".option(\"kafka.bootstrap.servers\", \"").append(servers).append("\")")
                   .append(".option(\"subscribe\", \"").append(topic).append("\")")
                   .append(".load()\n");
+                sb.append("df_").append(safeId)
+                  .append(".createOrReplaceTempView(\"").append(viewName).append("\")\n");
             }
+
+            // --- Transforms: use Spark SQL queries ---
             case "filter" -> {
-                String inputDf = getInputDf(parentIds, nodeMap);
+                String inputView = getInputView(parentIds);
                 String condition = getStr(props, "condition", "1=1");
-                sb.append("df_").append(safeId).append(" = ").append(inputDf)
-                  .append(".filter(\"").append(condition).append("\")\n");
+                sb.append("df_").append(safeId)
+                  .append(" = spark.sql(\"SELECT * FROM ").append(inputView)
+                  .append(" WHERE ").append(condition).append("\")\n");
+                sb.append("df_").append(safeId)
+                  .append(".createOrReplaceTempView(\"").append(viewName).append("\")\n");
             }
             case "select" -> {
-                String inputDf = getInputDf(parentIds, nodeMap);
+                String inputView = getInputView(parentIds);
                 String columns = getStr(props, "columns", "*");
-                String[] cols = Arrays.stream(columns.split(","))
-                        .map(String::trim)
-                        .map(c -> "\"" + c + "\"")
-                        .toArray(String[]::new);
-                sb.append("df_").append(safeId).append(" = ").append(inputDf)
-                  .append(".select(").append(String.join(", ", cols)).append(")\n");
+                sb.append("df_").append(safeId)
+                  .append(" = spark.sql(\"SELECT ").append(columns)
+                  .append(" FROM ").append(inputView).append("\")\n");
+                sb.append("df_").append(safeId)
+                  .append(".createOrReplaceTempView(\"").append(viewName).append("\")\n");
             }
             case "join" -> {
-                String leftDf = getInputDf(parentIds, nodeMap);
-                String rightDf = parentIds != null && parentIds.size() > 1
-                        ? "df_" + parentIds.get(1).replaceAll("[^a-zA-Z0-9_]", "_")
-                        : "df_right";
+                String leftView = getInputView(parentIds);
+                String rightView = parentIds != null && parentIds.size() > 1
+                        ? parentIds.get(1).replaceAll("[^a-zA-Z0-9_]", "_")
+                        : "right_table";
                 String joinKey = getStr(props, "joinKey", "id");
-                String joinType = getStr(props, "joinType", "inner");
-                sb.append("df_").append(safeId).append(" = ").append(leftDf)
-                  .append(".join(").append(rightDf).append(", \"").append(joinKey)
-                  .append("\", \"").append(joinType).append("\")\n");
+                String joinType = getStr(props, "joinType", "inner").toUpperCase();
+                sb.append("df_").append(safeId)
+                  .append(" = spark.sql(\"SELECT * FROM ").append(leftView)
+                  .append(" ").append(joinType).append(" JOIN ").append(rightView)
+                  .append(" ON ").append(leftView).append(".").append(joinKey)
+                  .append(" = ").append(rightView).append(".").append(joinKey)
+                  .append("\")\n");
+                sb.append("df_").append(safeId)
+                  .append(".createOrReplaceTempView(\"").append(viewName).append("\")\n");
             }
             case "group_by" -> {
-                String inputDf = getInputDf(parentIds, nodeMap);
+                String inputView = getInputView(parentIds);
                 String groupCols = getStr(props, "groupByColumns", "id");
-                String aggregation = getStr(props, "aggregation", "count(\"*\").alias(\"count\")");
-                String[] gcols = Arrays.stream(groupCols.split(","))
-                        .map(String::trim)
-                        .map(c -> "\"" + c + "\"")
-                        .toArray(String[]::new);
-                sb.append("df_").append(safeId).append(" = ").append(inputDf)
-                  .append(".groupBy(").append(String.join(", ", gcols)).append(")")
-                  .append(".agg(F.").append(aggregation).append(")\n");
+                String aggregation = getStr(props, "aggregation", "COUNT(*) AS count");
+                sb.append("df_").append(safeId)
+                  .append(" = spark.sql(\"SELECT ").append(groupCols)
+                  .append(", ").append(aggregation)
+                  .append(" FROM ").append(inputView)
+                  .append(" GROUP BY ").append(groupCols).append("\")\n");
+                sb.append("df_").append(safeId)
+                  .append(".createOrReplaceTempView(\"").append(viewName).append("\")\n");
             }
             case "rename" -> {
-                String inputDf = getInputDf(parentIds, nodeMap);
+                String inputView = getInputView(parentIds);
                 String oldName = getStr(props, "oldName", "old_col");
                 String newName = getStr(props, "newName", "new_col");
-                sb.append("df_").append(safeId).append(" = ").append(inputDf)
-                  .append(".withColumnRenamed(\"").append(oldName).append("\", \"").append(newName).append("\")\n");
+                sb.append("df_").append(safeId)
+                  .append(" = spark.sql(\"SELECT *, ").append(oldName)
+                  .append(" AS ").append(newName)
+                  .append(" FROM ").append(inputView).append("\")\n");
+                sb.append("df_").append(safeId)
+                  .append(".createOrReplaceTempView(\"").append(viewName).append("\")\n");
             }
+
+            // --- Sinks: read from temp view via SQL and write output ---
             case "csv_sink" -> {
-                String inputDf = getInputDf(parentIds, nodeMap);
+                String inputView = getInputView(parentIds);
                 String outputPath = getStr(props, "outputPath", "/data/output.csv");
                 String writeMode = getStr(props, "writeMode", "overwrite");
-                sb.append(inputDf)
+                sb.append("spark.sql(\"SELECT * FROM ").append(inputView).append("\")")
                   .append(".write.mode(\"").append(writeMode).append("\")")
                   .append(".csv(\"").append(outputPath).append("\")\n");
             }
             case "parquet_sink" -> {
-                String inputDf = getInputDf(parentIds, nodeMap);
+                String inputView = getInputView(parentIds);
                 String outputPath = getStr(props, "outputPath", "/data/output.parquet");
                 String writeMode = getStr(props, "writeMode", "overwrite");
-                sb.append(inputDf)
+                sb.append("spark.sql(\"SELECT * FROM ").append(inputView).append("\")")
                   .append(".write.mode(\"").append(writeMode).append("\")")
                   .append(".parquet(\"").append(outputPath).append("\")\n");
             }
             case "jdbc_sink" -> {
-                String inputDf = getInputDf(parentIds, nodeMap);
+                String inputView = getInputView(parentIds);
                 String url = getStr(props, "url", "jdbc:postgresql://localhost:5432/db");
                 String table = getStr(props, "table", "output_table");
                 String user = getStr(props, "user", "user");
                 String password = getStr(props, "password", "password");
                 String writeMode = getStr(props, "writeMode", "overwrite");
-                sb.append(inputDf)
+                sb.append("spark.sql(\"SELECT * FROM ").append(inputView).append("\")")
                   .append(".write.format(\"jdbc\")")
                   .append(".option(\"url\", \"").append(url).append("\")")
                   .append(".option(\"dbtable\", \"").append(table).append("\")")
@@ -211,10 +233,9 @@ public class SparkCodeGeneratorService {
         return sb.toString();
     }
 
-    private String getInputDf(List<String> parentIds, Map<String, NodeConfig> nodeMap) {
-        if (parentIds == null || parentIds.isEmpty()) return "df_input";
-        String parentId = parentIds.get(0);
-        return "df_" + parentId.replaceAll("[^a-zA-Z0-9_]", "_");
+    private String getInputView(List<String> parentIds) {
+        if (parentIds == null || parentIds.isEmpty()) return "input_table";
+        return parentIds.get(0).replaceAll("[^a-zA-Z0-9_]", "_");
     }
 
     private String getStr(Map<String, Object> props, String key, String defaultValue) {

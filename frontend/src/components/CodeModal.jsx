@@ -14,7 +14,7 @@ export default function CodeModal({ code, onClose }) {
     <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <div className="modal-content">
         <div className="modal-header">
-          <h2>⚡ Generated PySpark Code</h2>
+          <h2>⚡ Generated Spark SQL Code</h2>
           <div className="modal-actions">
             <button className="copy-btn" onClick={handleCopy}>
               {copied ? '✓ Copied!' : '📋 Copy'}

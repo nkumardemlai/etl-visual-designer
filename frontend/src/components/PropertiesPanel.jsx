@@ -14,7 +14,7 @@ const PROPERTY_LABELS = {
   joinKey: 'Join Key',
   joinType: 'Join Type (inner/left/right)',
   groupByColumns: 'Group By Columns',
-  aggregation: 'Aggregation (e.g. count("*").alias("cnt"))',
+  aggregation: 'Aggregation (e.g. COUNT(*) AS cnt)',
   oldName: 'Old Column Name',
   newName: 'New Column Name',
   outputPath: 'Output Path',
